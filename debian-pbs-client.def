@@ -2,25 +2,60 @@ Bootstrap: debootstrap
 OSVersion: bookworm
 MirrorURL: https://deb.debian.org/debian/
 
-%help
+%arguments
+  BUILD_VERSION=development
+  BUILD_REVISION=unknown
 
-  This apptainer image contains proxmox backup client on top of debian boookwork os image.
+%help
+  Proxmox Backup Server 3 client on Debian 12 (Bookworm).
+
+  The image runs proxmox-backup-client directly. For example:
+    ./debian-pbs-client.sif version
+    ./debian-pbs-client.sif snapshot list
 
 %labels
-
-   Author Josef Dvoracek
-   Version v20230907_1451
+  org.opencontainers.image.authors Josef Dvoracek
+  org.opencontainers.image.base.name debian:12
+  org.opencontainers.image.revision {{ BUILD_REVISION }}
+  org.opencontainers.image.source https://github.com/jose-d/apptainer-proxmox-backup-client
+  org.opencontainers.image.title proxmox-backup-client
+  org.opencontainers.image.version {{ BUILD_VERSION }}
 
 %post
+  set -eu
 
-  apt update
-  apt install -y wget
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y --no-install-recommends ca-certificates wget
 
-  wget https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg -O /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg
-  echo 'deb http://download.proxmox.com/debian/pbs-client bookworm main' | tee /etc/apt/sources.list.d/pbs-client.list
+  key_url=https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg
+  key_path=/usr/share/keyrings/proxmox-release-bookworm.gpg
+  key_sha256=13a87cec79f2d05f40f125629e4b509080a5c0286608bea273e36be9809ecaba
+  wget --https-only --quiet "$key_url" -O "$key_path"
+  echo "$key_sha256  $key_path" | sha256sum --check --strict -
 
-  apt update
-  apt install -y proxmox-backup-client
+  echo "deb [signed-by=$key_path] https://download.proxmox.com/debian/pbs-client bookworm main" \
+    > /etc/apt/sources.list.d/pbs-client.list
+
+  apt-get update
+  apt-get install -y --no-install-recommends proxmox-backup-client
+
+  client_version=$(dpkg-query -W -f='${Version}' proxmox-backup-client)
+  echo "org.opencontainers.image.proxmox-backup-client.version $client_version" >> "$APPTAINER_LABELS"
+
+  apt-get clean
+  rm -rf /var/lib/apt/lists/*
+
+%test
+  set -eu
+  test "$(dpkg --print-architecture)" = amd64
+  test "$(. /etc/os-release; printf '%s' "$VERSION_ID")" = 12
+  client_version=$(dpkg-query -W -f='${Version}' proxmox-backup-client)
+  case "$client_version" in
+    3.*) ;;
+    *) echo "Expected proxmox-backup-client 3.x, got $client_version" >&2; exit 1 ;;
+  esac
+  proxmox-backup-client version
 
 %runscript
-  /usr/bin/proxmox-backup-client "$@"
+  exec /usr/bin/proxmox-backup-client "$@"

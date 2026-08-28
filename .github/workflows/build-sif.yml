@@ -1,0 +1,208 @@
+name: Build PBS client SIF
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Publish a GitHub Release
+        required: true
+        type: boolean
+        default: false
+      release_tag:
+        description: Calendar tag (vYYYY.MM.DD); required when publishing
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  APPTAINER_VERSION: 1.5.3
+  APPTAINER_DEB_SHA256: 82b0bdddf459087d202383360b8318d526ad6826c748a2f669913cc6aef9ee40
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-24.04
+    outputs:
+      artifact_name: ${{ steps.build.outputs.artifact_name }}
+      sif_name: ${{ steps.build.outputs.sif_name }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate release inputs
+        env:
+          PUBLISH_RELEASE: ${{ inputs.publish_release }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$PUBLISH_RELEASE" != "true" ]]; then
+            if [[ -n "$RELEASE_TAG" ]]; then
+              echo "release_tag must be empty when publish_release is false" >&2
+              exit 1
+            fi
+            exit 0
+          fi
+
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]{4}\.[0-9]{2}\.[0-9]{2}$ ]]; then
+            echo "release_tag must have the form vYYYY.MM.DD" >&2
+            exit 1
+          fi
+
+          requested_date=${RELEASE_TAG#v}
+          normalized_date=$(date -u -d "${requested_date//./-}" '+%Y.%m.%d')
+          if [[ "$normalized_date" != "$requested_date" ]]; then
+            echo "release_tag contains an invalid calendar date" >&2
+            exit 1
+          fi
+
+      - name: Install Apptainer
+        run: |
+          set -euo pipefail
+          package="apptainer_${APPTAINER_VERSION}_amd64.deb"
+          url="https://github.com/apptainer/apptainer/releases/download/v${APPTAINER_VERSION}/${package}"
+
+          curl --fail --silent --show-error --location "$url" --output "$package"
+          echo "${APPTAINER_DEB_SHA256}  ${package}" | sha256sum --check --strict -
+          sudo apt-get update
+          sudo apt-get install -y "./${package}"
+          apptainer version
+
+      - name: Build and inspect image
+        id: build
+        env:
+          PUBLISH_RELEASE: ${{ inputs.publish_release }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          short_sha=${GITHUB_SHA::12}
+          build_version="sha-${short_sha}"
+          if [[ "$PUBLISH_RELEASE" == "true" ]]; then
+            build_version="$RELEASE_TAG"
+          fi
+
+          sudo apptainer build \
+            --build-arg "BUILD_VERSION=${build_version}" \
+            --build-arg "BUILD_REVISION=${GITHUB_SHA}" \
+            debian-pbs-client.sif debian-pbs-client.def
+          sudo chown "$(id -u):$(id -g)" debian-pbs-client.sif
+
+          os_id=$(apptainer exec debian-pbs-client.sif sh -c '. /etc/os-release; printf %s "$ID"')
+          os_version=$(apptainer exec debian-pbs-client.sif sh -c '. /etc/os-release; printf %s "$VERSION_ID"')
+          architecture=$(apptainer exec debian-pbs-client.sif dpkg --print-architecture)
+          client_version=$(apptainer exec debian-pbs-client.sif \
+            dpkg-query -W -f='${Version}' proxmox-backup-client)
+
+          [[ "$os_id" == "debian" ]]
+          [[ "$os_version" == "12" ]]
+          [[ "$architecture" == "amd64" ]]
+          if [[ ! "$client_version" =~ ^3\. ]]; then
+            echo "Expected proxmox-backup-client 3.x, got ${client_version}" >&2
+            exit 1
+          fi
+
+          safe_version=${client_version//:/_}
+          safe_version=${safe_version//+/_}
+          sif_name="debian-pbs-client-${safe_version}-bookworm-amd64.sif"
+          artifact_name="debian-pbs-client-${safe_version}-${short_sha}"
+          mv debian-pbs-client.sif "$sif_name"
+
+          apptainer run "$sif_name" version
+          apptainer inspect --json "$sif_name" > image-inspect.json
+          apptainer inspect --deffile "$sif_name" > embedded-definition.def
+          apptainer exec "$sif_name" \
+            dpkg-query -W -f='${binary:Package}\t${Version}\n' | sort > packages.tsv
+          sha256sum "$sif_name" > "${sif_name}.sha256"
+
+          {
+            echo "build_version=${build_version}"
+            echo "git_revision=${GITHUB_SHA}"
+            echo "git_ref=${GITHUB_REF}"
+            echo "built_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo "runner_image=${ImageOS:-unknown}-${ImageVersion:-unknown}"
+            echo "apptainer_version=$(apptainer version)"
+            echo "debian_version=${os_version}"
+            echo "architecture=${architecture}"
+            echo "proxmox_backup_client_version=${client_version}"
+          } > build-info.txt
+
+          echo "sif_name=${sif_name}" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=${artifact_name}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.build.outputs.artifact_name }}
+          path: |
+            ${{ steps.build.outputs.sif_name }}
+            ${{ steps.build.outputs.sif_name }}.sha256
+            build-info.txt
+            packages.tsv
+            image-inspect.json
+            embedded-definition.def
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: error
+
+  attest:
+    name: Attest image provenance
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: dist
+
+      - name: Verify image checksum
+        working-directory: dist
+        run: sha256sum --check --strict "${{ needs.build.outputs.sif_name }}.sha256"
+
+      - name: Attest image
+        uses: actions/attest-build-provenance@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/${{ needs.build.outputs.sif_name }}
+
+  release:
+    name: Publish release
+    if: ${{ inputs.publish_release }}
+    needs: [build, attest]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: dist
+
+      - name: Verify image checksum
+        working-directory: dist
+        run: sha256sum --check --strict "${{ needs.build.outputs.sif_name }}.sha256"
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/* \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_TAG" \
+              --generate-notes
+          fi
