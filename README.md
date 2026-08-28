@@ -30,8 +30,10 @@ GitHub also creates a build-provenance attestation for the SIF. The workflow rej
 a future PBS client major version instead of silently producing an incompatible
 image.
 
-To publish a release, run the workflow with **Publish a GitHub Release** enabled and
-provide a new calendar tag such as `v2026.08.28`. Release publishing is still
+To publish a release, run the workflow with **Publish a GitHub Release** enabled.
+The workflow generates a tag from the build time in the `Europe/Prague` timezone,
+for example `2026.08.28-15-42`. The hyphen between hour and minute is required
+because Git does not allow a colon in tag names. Release publishing is still
 button-triggered; pushing a tag does not start a build.
 
 ## Build locally
