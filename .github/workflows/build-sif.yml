@@ -68,7 +68,7 @@ jobs:
           curl --fail --silent --show-error --location "$url" --output "$package"
           echo "${APPTAINER_DEB_SHA256}  ${package}" | sha256sum --check --strict -
           sudo apt-get update
-          sudo apt-get install -y "./${package}" debootstrap
+          sudo apt-get install -y "./${package}" debootstrap debian-archive-keyring
           apptainer version
 
       - name: Build and inspect image

@@ -34,7 +34,7 @@ MirrorURL: https://deb.debian.org/debian/
   wget --https-only --quiet "$key_url" -O "$key_path"
   echo "$key_sha256  $key_path" | sha256sum --check --strict -
 
-  echo "deb [signed-by=$key_path] https://download.proxmox.com/debian/pbs-client bookworm main" \
+  echo "deb [signed-by=$key_path] http://download.proxmox.com/debian/pbs-client bookworm main" \
     > /etc/apt/sources.list.d/pbs-client.list
 
   apt-get update
