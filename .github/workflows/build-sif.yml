@@ -30,7 +30,7 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Validate release inputs
         env:
@@ -68,7 +68,7 @@ jobs:
           curl --fail --silent --show-error --location "$url" --output "$package"
           echo "${APPTAINER_DEB_SHA256}  ${package}" | sha256sum --check --strict -
           sudo apt-get update
-          sudo apt-get install -y "./${package}"
+          sudo apt-get install -y "./${package}" debootstrap
           apptainer version
 
       - name: Build and inspect image
